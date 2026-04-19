@@ -1,0 +1,500 @@
+version: "3.8"
+
+# =============================================================================
+#  BIG DATA PIPELINE — Full Stack Docker Compose
+#  Stack: Hadoop (HDFS + YARN) · Spark · Hive · HBase · Zookeeper · Airbyte
+# =============================================================================
+
+networks:
+  bigdata-net:
+    driver: bridge
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode1:
+  hadoop_datanode2:
+  hadoop_historyserver:
+  hive_metastore_db:
+  hbase_data:
+  zookeeper_data:
+  zookeeper_log:
+  airbyte_workspace:
+  airbyte_data:
+  airbyte_db:
+
+# ---------------------------------------------------------------------------
+# Shared Hadoop environment variables (reused across services via YAML anchors)
+# ---------------------------------------------------------------------------
+x-hadoop-env: &hadoop-env
+  CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+  CORE_CONF_hadoop_http_staticuser_user: root
+  HDFS_CONF_dfs_replication: 1
+  HDFS_CONF_dfs_webhdfs_enabled: "true"
+  HDFS_CONF_dfs_permissions_enabled: "false"
+  YARN_CONF_yarn_resourcemanager_hostname: resourcemanager
+  YARN_CONF_yarn_nodemanager_aux__services: mapreduce_shuffle
+  YARN_CONF_yarn_log___aggregation___enable: "true"
+  YARN_CONF_yarn_log_server_url: http://historyserver:8188/applicationhistory/logs/
+  MAPRED_CONF_mapreduce_framework_name: yarn
+  MAPRED_CONF_mapreduce_map_output_compress: "true"
+  MAPRED_CONF_mapreduce_jobhistory_address: historyserver:10020
+  MAPRED_CONF_mapreduce_jobhistory_webapp_address: historyserver:19888
+
+services:
+
+# =============================================================================
+#  HADOOP — HDFS
+# =============================================================================
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    restart: unless-stopped
+    ports:
+      - "9870:9870"   # NameNode Web UI
+      - "9000:9000"   # HDFS RPC
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+    environment:
+      <<: *hadoop-env
+      CLUSTER_NAME: bigdata-cluster
+      INIT_DAEMON_STEP: setup_hdfs
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  datanode1:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode1
+    restart: unless-stopped
+    ports:
+      - "9864:9864"   # DataNode Web UI
+    volumes:
+      - hadoop_datanode1:/hadoop/dfs/data
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+  datanode2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode2
+    restart: unless-stopped
+    ports:
+      - "9865:9864"
+    volumes:
+      - hadoop_datanode2:/hadoop/dfs/data
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  HADOOP — YARN (Resource Manager + Node Manager + History Server)
+# =============================================================================
+
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager
+    restart: unless-stopped
+    ports:
+      - "8088:8088"   # YARN Resource Manager Web UI
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870 datanode1:9864"
+    depends_on:
+      - namenode
+      - datanode1
+    networks:
+      - bigdata-net
+
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: nodemanager
+    restart: unless-stopped
+    ports:
+      - "8042:8042"   # Node Manager Web UI
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870 datanode1:9864 resourcemanager:8088"
+    depends_on:
+      - resourcemanager
+    networks:
+      - bigdata-net
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: historyserver
+    restart: unless-stopped
+    ports:
+      - "8188:8188"   # History Server Web UI
+      - "19888:19888" # MapReduce History Web UI
+    volumes:
+      - hadoop_historyserver:/hadoop/yarn/timeline
+    environment:
+      <<: *hadoop-env
+      SERVICE_PRECONDITION: "namenode:9870 datanode1:9864 resourcemanager:8088"
+    depends_on:
+      - resourcemanager
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  SPARK — Master + Worker
+# =============================================================================
+
+  spark-master:
+    image: bde2020/spark-master:3.3.0-hadoop3.3
+    container_name: spark-master
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # Spark Master Web UI
+      - "7077:7077"   # Spark Master RPC
+    environment:
+      - INIT_DAEMON_STEP=setup_spark
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    depends_on:
+      - namenode
+      - datanode1
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  spark-worker-1:
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+    container_name: spark-worker-1
+    restart: unless-stopped
+    ports:
+      - "8081:8081"   # Spark Worker Web UI
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+  spark-worker-2:
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+    container_name: spark-worker-2
+    restart: unless-stopped
+    ports:
+      - "8082:8081"
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  HIVE — Metastore + HiveServer2
+# =============================================================================
+
+  # Hive uses PostgreSQL as its metastore backend (more stable than Derby)
+  hive-metastore-db:
+    image: postgres:14-alpine
+    container_name: hive-metastore-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive_password
+    volumes:
+      - hive_metastore_db:/var/lib/postgresql/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    restart: unless-stopped
+    ports:
+      - "9083:9083"   # Hive Metastore Thrift port
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870 hive-metastore-db:5432"
+      HIVE_METASTORE_URIS: thrift://hive-metastore:9083
+      HIVE_METASTORE_DB_TYPE: postgres
+      HIVE_METASTORE_DB_HOST: hive-metastore-db
+      HIVE_METASTORE_DB_PORT: 5432
+      HIVE_METASTORE_DB_NAME: metastore
+      HIVE_METASTORE_DB_USER: hive
+      HIVE_METASTORE_DB_PASS: hive_password
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    command: /opt/hive/bin/hive --service metastore
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+  hiveserver2:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hiveserver2
+    restart: unless-stopped
+    ports:
+      - "10000:10000"  # HiveServer2 Thrift (JDBC)
+      - "10002:10002"  # HiveServer2 Web UI
+    environment:
+      SERVICE_PRECONDITION: "hive-metastore:9083"
+      HIVE_METASTORE_URIS: thrift://hive-metastore:9083
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    command: /opt/hive/bin/hiveserver2
+    depends_on:
+      - hive-metastore
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  ZOOKEEPER — Required by HBase
+# =============================================================================
+
+  zookeeper:
+    image: zookeeper:3.8
+    container_name: zookeeper
+    restart: unless-stopped
+    ports:
+      - "2181:2181"   # ZooKeeper client port
+    volumes:
+      - zookeeper_data:/data
+      - zookeeper_log:/datalog
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: server.1=zookeeper:2888:3888;2181
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+# =============================================================================
+#  HBASE — Master + RegionServer
+# =============================================================================
+
+  hbase-master:
+    image: bde2020/hbase-master:1.0.0-hbase1.2.6
+    container_name: hbase-master
+    restart: unless-stopped
+    ports:
+      - "16000:16000"  # HBase Master RPC
+      - "16010:16010"  # HBase Master Web UI
+    environment:
+      HBASE_CONF_hbase_rootdir: hdfs://namenode:9000/hbase
+      HBASE_CONF_hbase_cluster_distributed: "true"
+      HBASE_CONF_hbase_zookeeper_quorum: zookeeper
+      HBASE_CONF_hbase_zookeeper_property_clientPort: 2181
+      HBASE_CONF_hbase_master: hbase-master:16000
+      HBASE_CONF_hbase_master_hostname: hbase-master
+      HBASE_MANAGES_ZK: "false"
+      SERVICE_PRECONDITION: "namenode:9870 zookeeper:2181"
+    depends_on:
+      namenode:
+        condition: service_healthy
+      zookeeper:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:16010"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  hbase-regionserver:
+    image: bde2020/hbase-regionserver:1.0.0-hbase1.2.6
+    container_name: hbase-regionserver
+    restart: unless-stopped
+    ports:
+      - "16020:16020"  # RegionServer RPC
+      - "16030:16030"  # RegionServer Web UI
+    environment:
+      HBASE_CONF_hbase_rootdir: hdfs://namenode:9000/hbase
+      HBASE_CONF_hbase_cluster_distributed: "true"
+      HBASE_CONF_hbase_zookeeper_quorum: zookeeper
+      HBASE_CONF_hbase_zookeeper_property_clientPort: 2181
+      HBASE_CONF_hbase_regionserver_hostname: hbase-regionserver
+      HBASE_MANAGES_ZK: "false"
+      SERVICE_PRECONDITION: "namenode:9870 zookeeper:2181 hbase-master:16010"
+    depends_on:
+      hbase-master:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  AIRBYTE — Full Platform (Server + Webapp + Worker + Temporal + DB)
+# =============================================================================
+
+  airbyte-db:
+    image: airbyte/db:0.50.33
+    container_name: airbyte-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airbyte
+      POSTGRES_PASSWORD: airbyte_password
+      POSTGRES_DB: airbyte
+    volumes:
+      - airbyte_db:/var/lib/postgresql/data
+    networks:
+      - bigdata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airbyte -d airbyte"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airbyte-temporal:
+    image: airbyte/temporal:0.50.33
+    container_name: airbyte-temporal
+    restart: unless-stopped
+    ports:
+      - "7233:7233"
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: airbyte
+      POSTGRES_PWD: airbyte_password
+      POSTGRES_SEEDS: airbyte-db
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development.yaml
+    depends_on:
+      airbyte-db:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
+  airbyte-server:
+    image: airbyte/server:0.50.33
+    container_name: airbyte-server
+    restart: unless-stopped
+    ports:
+      - "8001:8001"   # Airbyte Server API
+    environment:
+      AIRBYTE_ROLE: server
+      AIRBYTE_VERSION: 0.50.33
+      CONFIG_DATABASE_USER: airbyte
+      CONFIG_DATABASE_PASSWORD: airbyte_password
+      CONFIG_DATABASE_URL: jdbc:postgresql://airbyte-db:5432/airbyte
+      TRACKING_STRATEGY: segment
+      TEMPORAL_HOST: airbyte-temporal:7233
+      WORKER_ENVIRONMENT: docker
+      WORKSPACE_ROOT: /workspace
+      CONFIG_ROOT: /configs
+      LOG_LEVEL: INFO
+    volumes:
+      - airbyte_workspace:/workspace
+      - airbyte_data:/configs
+      - /var/run/docker.sock:/var/run/docker.sock   # needed to launch connector containers
+    depends_on:
+      - airbyte-db
+      - airbyte-temporal
+    networks:
+      - bigdata-net
+
+  airbyte-worker:
+    image: airbyte/worker:0.50.33
+    container_name: airbyte-worker
+    restart: unless-stopped
+    environment:
+      AIRBYTE_ROLE: worker
+      AIRBYTE_VERSION: 0.50.33
+      CONFIG_DATABASE_USER: airbyte
+      CONFIG_DATABASE_PASSWORD: airbyte_password
+      CONFIG_DATABASE_URL: jdbc:postgresql://airbyte-db:5432/airbyte
+      TEMPORAL_HOST: airbyte-temporal:7233
+      WORKER_ENVIRONMENT: docker
+      WORKSPACE_ROOT: /workspace
+      LOG_LEVEL: INFO
+      MAX_SYNC_WORKERS: 5
+    volumes:
+      - airbyte_workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock   # needed to launch connector containers
+    depends_on:
+      - airbyte-server
+    networks:
+      - bigdata-net
+
+  airbyte-webapp:
+    image: airbyte/webapp:0.50.33
+    container_name: airbyte-webapp
+    restart: unless-stopped
+    ports:
+      - "8000:80"     # Airbyte Web UI  →  http://localhost:8000
+    environment:
+      AIRBYTE_ROLE: webapp
+      API_URL: http://airbyte-server:8001/api/v1/
+      CONNECTOR_BUILDER_API_URL: http://airbyte-server:8001
+    depends_on:
+      - airbyte-server
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  JUPYTER — Optional notebook for Spark/Hive exploration
+# =============================================================================
+
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.3.0
+    container_name: jupyter
+    restart: unless-stopped
+    ports:
+      - "8888:8888"   # Jupyter Web UI  →  http://localhost:8888
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      SPARK_MASTER: spark://spark-master:7077
+      PYSPARK_SUBMIT_ARGS: >
+        --master spark://spark-master:7077
+        --packages org.apache.spark:spark-hive_2.12:3.3.0
+        pyspark-shell
+    volumes:
+      - ./notebooks:/home/jovyan/work   # mount your notebooks folder
+    depends_on:
+      - spark-master
+    networks:
+      - bigdata-net
+
+# =============================================================================
+#  PORTAINER — Optional Docker management UI
+# =============================================================================
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+      - "9443:9443"   # Portainer HTTPS UI  →  https://localhost:9443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - bigdata-net
