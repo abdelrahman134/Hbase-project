@@ -1,15 +1,5 @@
-version: "3.8"
-
 # =============================================================================
 #  BIG DATA PIPELINE — Hadoop · Spark · Hive · HBase · ZooKeeper
-#
-#  NOTE: Airbyte runs SEPARATELY via official installer.
-#  Run Airbyte at: https://github.com/airbytehq/airbyte → bash run-ab-platform.sh
-#  Airbyte UI will be at: http://localhost:8000
-#
-#  After Airbyte is running, connect it to HDFS using:
-#    HDFS URI: hdfs://localhost:9000
-#    Destination path: /data/airbnb/listingsAndReviews
 # =============================================================================
 
 networks:
@@ -40,6 +30,21 @@ x-hadoop-env: &hadoop-env
   MAPRED_CONF_mapreduce_jobhistory_address: historyserver:10020
   MAPRED_CONF_mapreduce_jobhistory_webapp_address: historyserver:19888
 
+x-airbnb-env: &airbnb-env
+  MONGODB_URI: ${MONGODB_URI:-}
+  MONGODB_DATABASE: ${MONGODB_DATABASE:-sample_airbnb}
+  MONGODB_COLLECTION: ${MONGODB_COLLECTION:-listingsAndReviews}
+  AIRBNB_RAW_PATH: ${AIRBNB_RAW_PATH:-hdfs://namenode:9000/data/airbnb/raw/listingsAndReviews}
+  AIRBNB_INGEST_DATE: ${AIRBNB_INGEST_DATE:-}
+  AIRBNB_RAW_FULL_REFRESH: ${AIRBNB_RAW_FULL_REFRESH:-false}
+  AIRBNB_CLEAN_PATH: ${AIRBNB_CLEAN_PATH:-hdfs://namenode:9000/data/airbnb/clean/listings}
+  AIRBNB_ANALYTICS_PATH: ${AIRBNB_ANALYTICS_PATH:-hdfs://namenode:9000/data/airbnb/analytics/market_room_type_summary}
+  SPARK_OUTPUT_PARTITIONS: ${SPARK_OUTPUT_PARTITIONS:-4}
+  SPARK_SQL_SHUFFLE_PARTITIONS: ${SPARK_SQL_SHUFFLE_PARTITIONS:-8}
+  MONGO_SPARK_CONNECTOR_PACKAGE: ${MONGO_SPARK_CONNECTOR_PACKAGE:-org.mongodb.spark:mongo-spark-connector_2.12:10.2.2}
+  SPARK_HOME: /usr/local/spark
+  PYTHONPATH: /usr/local/spark/python:/usr/local/spark/python/lib/pyspark.zip:/usr/local/spark/python/lib/py4j-0.10.9.5-src.zip
+
 services:
 
 # =============================================================================
@@ -48,11 +53,10 @@ services:
 
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
-    container_name: namenode
     restart: unless-stopped
     ports:
       - "9870:9870"    # NameNode Web UI
-      - "9000:9000"    # HDFS RPC — Airbyte connects here
+      - "9000:9000"    # HDFS RPC
     volumes:
       - hadoop_namenode:/hadoop/dfs/name
     environment:
@@ -70,7 +74,6 @@ services:
 
   datanode1:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode1
     restart: unless-stopped
     ports:
       - "9864:9864"
@@ -87,7 +90,6 @@ services:
 
   datanode2:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode2
     restart: unless-stopped
     ports:
       - "9865:9864"
@@ -108,10 +110,9 @@ services:
 
   resourcemanager:
     image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
-    container_name: resourcemanager
     restart: unless-stopped
-    ports:
-      - "8088:8088"    # YARN Resource Manager Web UI
+    profiles:
+      - yarn
     environment:
       <<: *hadoop-env
       SERVICE_PRECONDITION: "namenode:9870 datanode1:9864"
@@ -123,8 +124,9 @@ services:
 
   nodemanager:
     image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
-    container_name: nodemanager
     restart: unless-stopped
+    profiles:
+      - yarn
     ports:
       - "8042:8042"
     environment:
@@ -137,8 +139,9 @@ services:
 
   historyserver:
     image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
-    container_name: historyserver
     restart: unless-stopped
+    profiles:
+      - yarn
     ports:
       - "8188:8188"
       - "19888:19888"
@@ -158,7 +161,6 @@ services:
 
   spark-master:
     image: bde2020/spark-master:3.3.0-hadoop3.3
-    container_name: spark-master
     restart: unless-stopped
     ports:
       - "8080:8080"    # Spark Master Web UI
@@ -180,15 +182,14 @@ services:
 
   spark-worker-1:
     image: bde2020/spark-worker:3.3.0-hadoop3.3
-    container_name: spark-worker-1
     restart: unless-stopped
     ports:
       - "8081:8081"
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-      - SPARK_WORKER_MEMORY=2g
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-2g}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
     depends_on:
       spark-master:
         condition: service_healthy
@@ -197,18 +198,46 @@ services:
 
   spark-worker-2:
     image: bde2020/spark-worker:3.3.0-hadoop3.3
-    container_name: spark-worker-2
     restart: unless-stopped
     ports:
       - "8082:8081"
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-      - SPARK_WORKER_MEMORY=2g
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-2g}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
     depends_on:
       spark-master:
         condition: service_healthy
+    networks:
+      - bigdata-net
+
+  airbnb-ingest:
+    image: jupyter/pyspark-notebook:spark-3.3.0
+    restart: "no"
+    profiles:
+      - jobs
+    volumes:
+      - ./notebooks:/home/jovyan/work:ro
+    environment:
+      <<: *airbnb-env
+      SPARK_MASTER_URL: spark://spark-master:7077
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    command: >
+      bash -lc "jupyter nbconvert
+      --to notebook
+      --execute /home/jovyan/work/mongo_airbnb_to_parquet.ipynb
+      --ExecutePreprocessor.timeout=-1
+      --output-dir=/tmp"
+    depends_on:
+      namenode:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker-1:
+        condition: service_started
+      spark-worker-2:
+        condition: service_started
     networks:
       - bigdata-net
 
@@ -218,12 +247,15 @@ services:
 
   hive-metastore-db:
     image: postgres:14-alpine
-    container_name: hive-metastore-db
     restart: unless-stopped
+    profiles:
+      - hive
+    command: ["postgres", "-c", "password_encryption=md5"]
     environment:
       POSTGRES_DB: metastore
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive_password
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
     volumes:
       - hive_metastore_db:/var/lib/postgresql/data
     networks:
@@ -235,12 +267,35 @@ services:
       retries: 5
       start_period: 20s
 
+  hive-metastore-init:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    restart: "no"
+    profiles:
+      - hive
+    volumes:
+      - ./hive-conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+      - ./hive-conf/init-metastore.sh:/init-metastore.sh:ro
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870 hive-metastore-db:5432"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    command: /bin/bash /init-metastore.sh
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+
   hive-metastore:
     image: bde2020/hive:2.3.2-postgresql-metastore
-    container_name: hive-metastore
     restart: unless-stopped
+    profiles:
+      - hive
     ports:
       - "9083:9083"    # Hive Metastore Thrift
+    volumes:
+      - ./hive-conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
     environment:
       SERVICE_PRECONDITION: "namenode:9870 hive-metastore-db:5432"
       HIVE_METASTORE_URIS: thrift://hive-metastore:9083
@@ -253,25 +308,26 @@ services:
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
     command: /opt/hive/bin/hive --service metastore
     depends_on:
-      hive-metastore-db:
-        condition: service_healthy
-      namenode:
-        condition: service_healthy
+      hive-metastore-init:
+        condition: service_completed_successfully
     networks:
       - bigdata-net
 
   hiveserver2:
     image: bde2020/hive:2.3.2-postgresql-metastore
-    container_name: hiveserver2
     restart: unless-stopped
+    profiles:
+      - hive
     ports:
       - "10000:10000"  # HiveServer2 JDBC
       - "10002:10002"  # HiveServer2 Web UI
+    volumes:
+      - ./hive-conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
     environment:
       SERVICE_PRECONDITION: "hive-metastore:9083"
       HIVE_METASTORE_URIS: thrift://hive-metastore:9083
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
-    command: /opt/hive/bin/hiveserver2
+    command: startup.sh
     depends_on:
       - hive-metastore
     networks:
@@ -283,8 +339,9 @@ services:
 
   zookeeper:
     image: zookeeper:3.8
-    container_name: zookeeper
     restart: unless-stopped
+    profiles:
+      - hbase
     ports:
       - "2181:2181"
     volumes:
@@ -308,8 +365,9 @@ services:
 
   hbase-master:
     image: bde2020/hbase-master:1.0.0-hbase1.2.6
-    container_name: hbase-master
     restart: unless-stopped
+    profiles:
+      - hbase
     ports:
       - "16000:16000"
       - "16010:16010"  # HBase Master Web UI
@@ -338,8 +396,9 @@ services:
 
   hbase-regionserver:
     image: bde2020/hbase-regionserver:1.0.0-hbase1.2.6
-    container_name: hbase-regionserver
     restart: unless-stopped
+    profiles:
+      - hbase
     ports:
       - "16020:16020"
       - "16030:16030"
@@ -363,32 +422,20 @@ services:
 
   jupyter:
     image: jupyter/pyspark-notebook:spark-3.3.0
-    container_name: jupyter
     restart: unless-stopped
+    profiles:
+      - dev
     ports:
       - "8888:8888"    # Jupyter Web UI
     environment:
+      <<: *airbnb-env
       JUPYTER_ENABLE_LAB: "yes"
       SPARK_MASTER: spark://spark-master:7077
+      SPARK_MASTER_URL: spark://spark-master:7077
     volumes:
       - ./notebooks:/home/jovyan/work
     depends_on:
       spark-master:
         condition: service_healthy
-    networks:
-      - bigdata-net
-
-# =============================================================================
-#  PORTAINER — Docker management UI
-# =============================================================================
-
-  portainer:
-    image: portainer/portainer-ce:latest
-    container_name: portainer
-    restart: unless-stopped
-    ports:
-      - "9443:9443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - bigdata-net

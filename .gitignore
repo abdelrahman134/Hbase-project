@@ -1,0 +1,7 @@
+.env
+.codex
+.codex/
+*.parquet
+*.snappy.parquet
+__pycache__/
+.pytest_cache/
