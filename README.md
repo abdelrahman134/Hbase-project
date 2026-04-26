@@ -1,7 +1,6 @@
 # Airbnb Big Data Pipeline
 
 ![Project Data Workflow Setup](architecture.png)
-*(Note: Please save your uploaded architecture diagram as `architecture.png` in the root of the project to display it here)*
 
 This project implements a local big-data pipeline for an Airbnb sample collection. It extracts data from MongoDB Atlas, processes it via Apache Spark, orchestrates with Hadoop (HDFS/YARN), manages metadata and queries with Apache Hive, and serves it through Apache HBase.
 
