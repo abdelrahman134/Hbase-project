@@ -23,3 +23,5 @@ STORED AS PARQUET
 LOCATION '/data/airbnb/analytics/market_room_type_summary';
 
 MSCK REPAIR TABLE airbnb.market_room_type_summary;
+
+SELECT * FROM airbnb.market_room_type_summary LIMIT 5;

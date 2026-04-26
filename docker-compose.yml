@@ -163,7 +163,7 @@ services:
     image: bde2020/spark-master:3.3.0-hadoop3.3
     restart: unless-stopped
     ports:
-      - "8080:8080"    # Spark Master Web UI
+      - "8085:8080"    # Spark Master Web UI
       - "7077:7077"    # Spark Master RPC
     environment:
       - INIT_DAEMON_STEP=setup_spark
