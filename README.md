@@ -1,4 +1,4 @@
-# Airbnb Big Data Pipeline (HBase Project)
+# Airbnb Big Data Pipeline
 
 ![Project Data Workflow Setup](architecture.png)
 *(Note: Please save your uploaded architecture diagram as `architecture.png` in the root of the project to display it here)*
