@@ -1,110 +1,75 @@
-# Hbase-project
+# Airbnb Big Data Pipeline (HBase Project)
 
-Local big-data pipeline for the Airbnb sample collection:
+![Project Data Workflow Setup](architecture.png)
+*(Note: Please save your uploaded architecture diagram as `architecture.png` in the root of the project to display it here)*
 
-MongoDB Atlas `sample_airbnb.listingsAndReviews` -> Spark -> HDFS Parquet -> Hive handoff -> HBase handoff.
+This project implements a local big-data pipeline for an Airbnb sample collection. It extracts data from MongoDB Atlas, processes it via Apache Spark, orchestrates with Hadoop (HDFS/YARN), manages metadata and queries with Apache Hive, and serves it through Apache HBase.
 
-This repo stops at the Spark/Parquet handoff. Hive table creation and HBase loading are documented for the next step, but not executed by the Spark job.
+## 🗂️ Project Structure
 
-For the full architecture, environment, service roles, and expected Hive/HBase layers, see [docs/architecture.md](docs/architecture.md).
+Below is the layout of the project's ecosystem:
 
-## What Spark Produces
+- **[`notebooks/`](notebooks/)**: Contains Jupyter notebooks for development and Spark ingestion jobs (e.g., `mongo_airbnb_to_parquet.ipynb`).
+- **[`docs/`](docs/)**: In-depth repository documentation (`architecture.md`), SQL scripts for Hive table creation & HBase mapping, and query screenshots within `results/`.
+- **[`hive-conf/`](hive-conf/)**: Configuration settings for the Apache Hive environment (`hive-site.xml`) and the metastore initialization.
+- **[`hive/`](hive/)**: Dedicated for Hive-specific scripts, configurations, or localized storage.
+- **[`spark/`](spark/)**: Dedicated for standalone Apache Spark scripts or jobs apart from notebooks.
+- **`docker-compose.yml`**: Defines the robust Docker environment consisting of Hadoop, Spark, Hive, ZooKeeper, and HBase.
 
-The ingestion job writes three HDFS Parquet datasets:
+## 🛠️ Tech Stack & Pipeline Data Flow
 
-- Raw copy partitioned by `ingest_date`: `hdfs://namenode:9000/data/airbnb/raw/listingsAndReviews`
-- Clean Hive-ready table: `hdfs://namenode:9000/data/airbnb/clean/listings`
-- Analytics summary: `hdfs://namenode:9000/data/airbnb/analytics/market_room_type_summary`
+1. **MongoDB Atlas** (`sample_airbnb.listingsAndReviews`): The starting data source containing nested JSON documents.
+2. **Apache Spark (Compute)**: Extracts, filters, transforms, and flattens the nested data. Output is partitioned and pushed directly into HDFS.
+3. **Hadoop Data Lake (HDFS)**: Stores `raw` partitioned snapshots, `clean` tables, and `analytics` summaries natively in the Parquet format. 
+4. **Apache Hive (Metadata & Schema Management)**: Provides step-up tables, scheme mappings, and SQL querying interfaces over the distributed Parquet files.
+5. **Apache HBase (Target Data Store)**: Low-latency target storage for serving processed analytics data globally. Managed effectively through ZooKeeper.
 
-The raw dataset keeps the MongoDB document shape as closely as Spark can represent it and stores each run under `ingest_date=YYYY-MM-DD`. The clean dataset flattens stable Airbnb fields, writes Snappy-compressed Parquet, and partitions by `country_code` for Hive. The analytics summary aggregates market, room type, and property type metrics such as median price, price per guest, booking pressure, review quality, and host verification rates.
+## 🚀 Setup & Execution
 
-## Setup
-
-Create a local env file:
-
+### 1. Configuration
+Create a local environment file from the provided template:
 ```bash
 cp env.example .env
 ```
+Edit `.env` and set `MONGODB_URI` to your Atlas connection string. *(Never commit `.env`)*. `AIRBNB_INGEST_DATE` can be kept empty to map the run date, or given a specific date for reproducible runs.
 
-Edit `.env` and set `MONGODB_URI` to the Atlas URI. Do not commit `.env`.
-
-`AIRBNB_INGEST_DATE` is optional. Leave it empty to use the run date, or set it to a specific `YYYY-MM-DD` value for reproducible backfills.
-
-`AIRBNB_RAW_FULL_REFRESH=true` rewrites the full raw dataset into the partitioned layout. Leave it `false` for normal runs so each run only replaces its own `ingest_date=...` raw partition.
-
-If a real MongoDB password has ever been pasted into chat or committed to Git, rotate it in MongoDB Atlas before sharing the repo.
-
-## Run
-
-Start the minimum services for ingestion:
-
+### 2. Services Initialization
+Start the default core cluster (HDFS & Spark Base):
 ```bash
 docker compose up -d
 ```
 
-Run the notebook-backed Spark job:
-
+### 3. Data Ingestion (Spark Job)
+Run the Spark processing/notebook ingestion job to extract records from MongoDB into Parquet HDFS layers:
 ```bash
 docker compose run --rm airbnb-ingest
 ```
 
-Compose executes `notebooks/mongo_airbnb_to_parquet.ipynb` with `jupyter nbconvert`, so the same notebook can also be opened from the `jupyter` service for development.
-
-Optional services for teammate work:
-
+### 4. Enable Hive and HBase Layers
+To bring up the Hive query capabilities alongside the HBase metadata serving layer:
 ```bash
 docker compose --profile hive up -d
 docker compose --profile hbase up -d
+```
+*(Optional)* Spin up the Jupyter development UI:
+```bash
 docker compose --profile dev up -d jupyter
 ```
 
-Profiles keep optional tools out of the default startup path. The default stack is only HDFS and Spark; the `jobs` profile is used internally by the one-shot `airbnb-ingest` service when you run it directly.
+## 📊 Outputs & Results
 
-## Verify Outputs
+### Spark Parquet Outputs to HDFS:
+- **Raw Partitioning**: `hdfs://namenode:9000/data/airbnb/raw/listingsAndReviews/ingest_date=YYYY-MM-DD`
+- **Clean Relational Table**: `hdfs://namenode:9000/data/airbnb/clean/listings`
+- **Analytics Target Summary**: `hdfs://namenode:9000/data/airbnb/analytics/market_room_type_summary`
 
-Check HDFS paths:
+### Apache Hive Query Execution
+After ingestion concludes, register schemas in Hive and query cleanly parsed data schemas (referencing scripts under `docs/` such as `hive_airbnb_clean.sql`):
+![Hive Query Result](docs/results/hive_query_result.png)
 
-```bash
-docker compose exec namenode hdfs dfs -ls /data/airbnb/raw/listingsAndReviews
-docker compose exec namenode hdfs dfs -ls /data/airbnb/raw/listingsAndReviews/ingest_date=$(date +%F)
-docker compose exec namenode hdfs dfs -ls /data/airbnb/clean/listings
-docker compose exec namenode hdfs dfs -ls /data/airbnb/analytics/market_room_type_summary
-```
+### Apache HBase Target Storage
+Final HBase lookups mapping key values for high-speed delivery using the Hive-to-HBase handoff:
+![HBase Scan Output](docs/results/hbase_scan_output.png)
 
-Check the clean Parquet row count from Spark:
-
-```bash
-docker compose run --rm airbnb-ingest pyspark --master spark://spark-master:7077
-```
-
-Then run:
-
-```python
-spark.read.parquet("hdfs://namenode:9000/data/airbnb/clean/listings").count()
-```
-
-## Hive Handoff
-
-The Hive external-table SQL files are:
-
-- `docs/hive_airbnb_clean.sql`
-- `docs/hive_airbnb_market_summary.sql`
-
-After the Spark job finishes, your coworker can run that SQL in Hive. The table points at:
-
-```text
-/data/airbnb/clean/listings
-```
-
-Because the clean output is partitioned by `country_code`, run:
-
-```sql
-MSCK REPAIR TABLE airbnb.listings_clean;
-```
-
-## Notes
-
-- MongoDB is read with the official MongoDB Spark Connector package.
-- The connector package defaults to `org.mongodb.spark:mongo-spark-connector_2.12:10.2.2` and can be overridden with `MONGO_SPARK_CONNECTOR_PACKAGE`.
-- Spark uses adaptive query execution, Kryo serialization, compressed shuffles, and Snappy Parquet compression.
-- The clean output is intentionally simple and scalar-heavy so Hive can query it easily and HBase loading can choose row keys/column families later.
+## 📖 Further Documentation
+Please see [**`docs/architecture.md`**](docs/architecture.md) for full descriptions mapping the pipeline node responsibilities, cluster profile configurations, SQL design definitions, and the pipeline's expected end state.
